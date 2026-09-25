@@ -1,7 +1,129 @@
-🟢 Zion: Red Light, Green Light
-Multiplayer browser game
-Offline
-Enter the game
-Your nameRoom code
-Create roomJoin room
-Create a room, then share the 4-letter code with friends. Everyone opens the same hosted URL.
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width,initial-scale=1">
+<title>Zion Squid Game — Multiplayer</title>
+<style>
+*{box-sizing:border-box}body{margin:0;background:#101615;color:#fff;font-family:Arial,sans-serif;display:flex;justify-content:center;padding:16px}
+.app{width:min(1180px,100%)}h1{margin:0;font-size:30px}.top{display:flex;justify-content:space-between;gap:10px;align-items:center;flex-wrap:wrap}.muted{opacity:.65;font-size:13px}
+.panel{margin:12px 0;padding:14px;background:#ffffff0d;border:1px solid #ffffff1c;border-radius:14px}
+.row{display:flex;gap:8px;flex-wrap:wrap}.row>*{flex:1;min-width:130px}input,button{border:0;border-radius:10px;padding:12px;font-size:16px}input{background:#fff;color:#222}
+button{background:#08704f;color:#fff;font-weight:800;cursor:pointer}button.secondary{background:#3f4b51}button.danger{background:#b52232}
+#game{display:none;width:100%;height:auto;border-radius:18px;box-shadow:0 20px 55px #0009;touch-action:none}
+.hud{display:flex;gap:7px;flex-wrap:wrap;margin:10px 0}.pill{padding:9px 12px;border-radius:10px;background:#ffffff12;font-weight:800}
+#message{min-height:22px;color:#ffd37a}.roomcode{font-size:28px;font-weight:900;letter-spacing:4px}
+.controls{display:flex;gap:8px;justify-content:center;flex-wrap:wrap;margin-top:10px}.controls button{min-width:150px}
+#lobbyPlayers{line-height:1.8}
+</style>
+</head>
+<body>
+<div class="app">
+<div class="top"><div><h1>🔴🟢 Zion Squid Game</h1><div class="muted">Real-time multiplayer Red Light, Green Light</div></div><div id="roomInfo"></div></div>
+
+<div id="lobby" class="panel">
+  <div class="row">
+    <input id="name" maxlength="18" placeholder="Your name" value="Player 067">
+    <input id="room" maxlength="6" placeholder="Room code">
+    <button id="create">CREATE ROOM</button>
+    <button id="join" class="secondary">JOIN ROOM</button>
+  </div>
+  <div class="row" style="margin-top:8px">
+    <button id="hard" class="danger">🔥 HARD MODE: OFF</button>
+    <button id="ready" disabled>READY</button>
+    <button id="restart" class="secondary" disabled>RESTART</button>
+  </div>
+  <p id="message">Create a room, then share the 6-digit code with your friends.</p>
+  <div id="lobbyPlayers"></div>
+</div>
+
+<div id="gameArea" style="display:none">
+<div class="hud"><div id="phase" class="pill">LOBBY</div><div class="pill">TIME <span id="timer">60.0</span></div><div class="pill">ROOM <span id="roomCode"></span></div></div>
+<canvas id="game" width="1180" height="660"></canvas>
+<div class="controls"><button id="move">🏃 MOVE</button><button id="sound" class="secondary">🔊 SOUND ON</button></div>
+</div>
+</div>
+
+<script src="/socket.io/socket.io.js"></script>
+<script>
+const socket=io();
+const canvas=document.getElementById("game"),ctx=canvas.getContext("2d");
+const img=new Image();img.src="/zion.png";
+let state=null,you=null,hard=false,soundOn=true,audio=null,moveHeld=false,lastStateAt=0;
+
+const $=id=>document.getElementById(id);
+function beep(f=440,d=.1,t="sine",v=.035){
+ if(!soundOn)return;try{audio=audio||new(window.AudioContext||window.webkitAudioContext)();
+ const o=audio.createOscillator(),g=audio.createGain();o.type=t;o.frequency.value=f;g.gain.value=v;o.connect(g);g.connect(audio.destination);o.start();g.gain.exponentialRampToValueAtTime(.001,audio.currentTime+d);o.stop(audio.currentTime+d)}catch(e){}
+}
+function setMsg(s){$("message").textContent=s}
+function phaseText(p){return p==="green"?"🟢 GREEN LIGHT":p==="red"?"🔴 RED LIGHT":p==="won"?"🏆 WINNER":p==="lost"?"💥 GAME OVER":p.toUpperCase()}
+$("create").onclick=()=>socket.emit("createRoom",{name:$("name").value||"Player",hard});
+$("join").onclick=()=>socket.emit("joinRoom",{name:$("name").value||"Player",code:$("room").value});
+$("ready").onclick=()=>socket.emit("ready");
+$("restart").onclick=()=>socket.emit("restart");
+$("hard").onclick=()=>{hard=!hard;$("hard").textContent=hard?"🔥 HARD MODE: ON":"🔥 HARD MODE: OFF";$("hard").style.background=hard?"#7c1724":""};
+$("sound").onclick=()=>{soundOn=!soundOn;$("sound").textContent=soundOn?"🔊 SOUND ON":"🔇 SOUND OFF";if(soundOn)beep(700,.1)};
+function doMove(){socket.emit("move");if(soundOn)beep(150,.035,"triangle",.012)}
+$("move").onpointerdown=e=>{e.preventDefault();moveHeld=true;doMove()};$("move").onpointerup=()=>moveHeld=false;$("move").onpointerleave=()=>moveHeld=false;window.onpointerup=()=>moveHeld=false;
+window.onkeydown=e=>{if(["ArrowUp","w","W"," "].includes(e.key)){e.preventDefault();doMove()}};
+
+socket.on("joined",d=>{you=d.you;$("roomCode").textContent=d.code;$("roomInfo").innerHTML='<span class="roomcode">'+d.code+'</span>';setMsg("Share this room code with your friends.")});
+socket.on("errorMessage",setMsg);
+socket.on("eliminated",d=>setMsg(d.reason));
+socket.on("state",s=>{
+ state=s;lastStateAt=performance.now();
+ $("gameArea").style.display="block";$("game").style.display="block";
+ $("ready").disabled=s.status!=="lobby";$("restart").disabled=s.hostId!==you;
+ $("ready").textContent=s.players.find(p=>p.id===you)?.ready?"✓ READY":"READY";
+ $("roomCode").textContent=s.code;
+ $("phase").textContent=phaseText(s.status==="playing"?s.phase:s.status);
+ $("timer").textContent=Math.max(0,s.timeLeft).toFixed(1);
+ $("lobbyPlayers").innerHTML=s.players.map(p=>`${p.number} — ${escapeHtml(p.name)} ${p.ready?"✓":""} ${p.alive?"":"💀"}`).join("<br>");
+ if(s.status==="countdown")setMsg("Get ready… 3… 2… 1…");
+ if(s.status==="playing")setMsg(s.phase==="green"?"RUN!":"STOP!");
+ if(s.status==="won")setMsg("Someone reached the finish!");
+ if(s.status==="lost")setMsg("Game over.");
+});
+function escapeHtml(s){return s.replace(/[&<>"']/g,m=>({"&":"&amp;","<":"&lt;",">":"&gt;",'"':"&quot;","'":"&#39;"}[m]))}
+
+function background(){
+ let g=ctx.createLinearGradient(0,0,0,660);g.addColorStop(0,"#82c7df");g.addColorStop(.45,"#cbd8b4");g.addColorStop(.46,"#d7c68d");g.addColorStop(1,"#a58b5a");ctx.fillStyle=g;ctx.fillRect(0,0,1180,660);
+ ctx.fillStyle="#fff7";[[130,75,55],[190,75,38],[910,70,60],[970,75,42]].forEach(a=>{ctx.beginPath();ctx.arc(a[0],a[1],a[2],0,7);ctx.fill()});
+ ctx.fillStyle="#859954";ctx.fillRect(0,220,1180,65);ctx.fillStyle="#a98937";for(let x=0;x<1180;x+=14)ctx.fillRect(x,218+Math.sin(x*.08)*4,7,70);
+}
+function buildings(){
+ function house(x,y,s){ctx.save();ctx.translate(x,y);ctx.scale(s,s);ctx.fillStyle="#eee4ca";ctx.fillRect(0,45,150,90);ctx.fillStyle="#bb6950";ctx.beginPath();ctx.moveTo(-12,46);ctx.lineTo(75,0);ctx.lineTo(162,46);ctx.closePath();ctx.fill();ctx.fillStyle="#32645a";ctx.fillRect(57,83,39,52);ctx.restore()}
+ house(70,165,.72);house(925,165,.72);
+ ctx.strokeStyle="#34261e";ctx.lineWidth=18;ctx.beginPath();ctx.moveTo(590,210);ctx.lineTo(590,48);ctx.stroke();ctx.lineWidth=7;
+ [[590,85,475,18],[590,105,705,25],[590,138,485,70],[590,130,700,72]].forEach(p=>{ctx.beginPath();ctx.moveTo(p[0],p[1]);ctx.lineTo(p[2],p[3]);ctx.stroke()});
+}
+function ground(){
+ ctx.fillStyle="#d7c68c";ctx.fillRect(0,285,1180,375);ctx.strokeStyle="#bba56a";ctx.lineWidth=2;
+ for(let y=310;y<660;y+=34){ctx.beginPath();ctx.moveTo(0,y);ctx.lineTo(1180,y);ctx.stroke()}
+ ctx.strokeStyle="#ffffff33";ctx.lineWidth=3;for(let i=0;i<7;i++){ctx.beginPath();ctx.moveTo(590,300);ctx.lineTo(50+i*180,660);ctx.stroke()}
+ ctx.fillStyle="#eee7d3";ctx.fillRect(1000,300,7,275);ctx.fillStyle="#111";ctx.fillRect(1007,300,11,275);
+}
+function doll(){
+ ctx.save();ctx.translate(590,135);ctx.rotate(state?.phase==="red"?Math.PI:0);
+ ctx.fillStyle="#f2ad4d";ctx.fillRect(-42,58,84,92);ctx.fillStyle="#ed7436";ctx.fillRect(-42,112,84,65);ctx.fillStyle="#efc19a";ctx.beginPath();ctx.arc(0,25,42,0,7);ctx.fill();ctx.fillStyle="#29221e";ctx.beginPath();ctx.arc(0,14,44,Math.PI,7);ctx.fill();ctx.fillStyle="#111";ctx.beginPath();ctx.arc(-15,27,5,0,7);ctx.arc(15,27,5,0,7);ctx.fill();ctx.restore();
+}
+function drawPlayer(p,isYou){
+ const bob=state?.status==="playing"&&state.phase==="green"&&p.alive?Math.sin(performance.now()/70+p.x)*5:0;
+ ctx.save();ctx.translate(p.x,535+bob);
+ if(isYou){ctx.drawImage(img,900,390,340,330,-82,-165,164,159)}
+ else{ctx.fillStyle="#086b53";ctx.fillRect(-24,-100,48,78);ctx.fillStyle="#111";ctx.fillRect(-19,-22,15,47);ctx.fillRect(4,-22,15,47);ctx.fillStyle="#eab996";ctx.beginPath();ctx.arc(0,-120,27,0,7);ctx.fill();ctx.fillStyle="#25201d";ctx.beginPath();ctx.arc(0,-127,28,Math.PI,7);ctx.fill()}
+ ctx.fillStyle="#fff";ctx.font="bold 12px Arial";ctx.textAlign="center";ctx.fillText(p.number,0,-66);
+ if(!p.alive){ctx.fillStyle="#a00000aa";ctx.beginPath();ctx.arc(0,-85,52,0,7);ctx.fill();ctx.fillStyle="#fff";ctx.font="bold 30px Arial";ctx.fillText("✕",0,-75)}
+ ctx.restore();
+}
+function render(){
+ ctx.clearRect(0,0,1180,660);background();buildings();ground();doll();
+ if(state){state.players.filter(p=>p.id!==you).forEach(p=>drawPlayer(p,false));const me=state.players.find(p=>p.id===you);if(me)drawPlayer(me,true)}
+ requestAnimationFrame(render);
+}
+render();
+setInterval(()=>{if(moveHeld)doMove()},180);
+</script>
+</body>
+</html>

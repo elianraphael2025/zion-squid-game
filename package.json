@@ -1,10 +1,17 @@
 {
-  "name": "zion-squid-multiplayer",
+  "name": "zion-squid-game-multiplayer",
   "version": "1.0.0",
   "private": true,
-  "description": "A small multiplayer Red Light, Green Light browser game starring Zion.",
+  "description": "Realtime multiplayer Red Light Green Light game for Player 067",
   "main": "server.js",
-  "scripts": {"start": "node server.js"},
-  "dependencies": {"ws": "^8.18.0"},
-  "engines": {"node": ">=18"}
+  "scripts": {
+    "start": "node server.js"
+  },
+  "engines": {
+    "node": ">=20"
+  },
+  "dependencies": {
+    "express": "^5.1.0",
+    "socket.io": "^4.8.1"
+  }
 }

@@ -1,28 +1,30 @@
-# Zion — Multiplayer Red Light, Green Light
+# Zion Squid Game Multiplayer
 
-This is a real multiplayer browser game. The server keeps the room, players,
-light state, movement and eliminations synchronized over WebSockets.
+Real-time Red Light, Green Light multiplayer game using Node.js, Express and Socket.IO.
 
-## Run locally
+## Files
 
-1. Install Node.js 18+.
-2. In this folder run:
-   npm install
-   npm start
-3. Open http://localhost:3000
-4. Create a room and share the room code.
+- `server.js` — multiplayer game server
+- `package.json` — dependencies/start command
+- `public/index.html` — browser game
+- `public/zion.png` — Player 067 character image
 
-For friends on other devices, the server must be hosted on a public HTTPS-capable
-Node host. A static-only host such as GitHub Pages cannot run the WebSocket server.
+## Local test
 
-## Game rules
+```bash
+npm install
+npm start
+```
 
-- GREEN LIGHT: hold the RUN button (or Space / Right Arrow) to move.
-- RED LIGHT: freeze. If you are moving when red begins, you are eliminated.
-- First living player to reach the finish wins.
-- The host can reset the lobby and start another round.
+Open http://localhost:3000
 
-## Customizing
+## Railway
 
-Replace `public/zion.png` with another PNG/JPG if desired. The default player
-name is Zion and every displayed player currently uses Zion's supplied avatar.
+1. Push this folder to GitHub.
+2. In Railway, create/use the `zion-squid-game` project.
+3. Deploy the GitHub repository.
+4. Railway detects `package.json` and runs `npm start`.
+5. Generate a public domain in Railway.
+6. Share the generated URL. Players can create/join rooms from that page.
+
+The server binds to `0.0.0.0` and uses Railway's `PORT` environment variable.

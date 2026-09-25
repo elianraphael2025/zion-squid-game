@@ -1,217 +1,203 @@
-
-const http = require("http");
-const fs = require("fs");
 const path = require("path");
-const crypto = require("crypto");
-const WebSocket = require("ws");
+const http = require("http");
+const express = require("express");
+const { Server } = require("socket.io");
+
+const app = express();
+const server = http.createServer(app);
+const io = new Server(server);
 
 const PORT = process.env.PORT || 3000;
+const MAX_PLAYERS = 10;
 const rooms = new Map();
-const COLORS = ["#f7c948","#61dafb","#ff7b9c","#9be564","#c7a4ff","#ff9f68","#7ee0b5","#f78fb3"];
 
-function roomCode() {
+app.use(express.static(path.join(__dirname, "public")));
+app.get("/health", (_req, res) => res.json({ ok: true, rooms: rooms.size }));
+
+function code() {
   let c;
-  do { c = Math.random().toString(36).slice(2, 6).toUpperCase(); } while (rooms.has(c));
+  do c = Math.floor(100000 + Math.random() * 900000).toString();
+  while (rooms.has(c));
   return c;
 }
-function safeName(name) {
-  name = String(name || "Player").trim().slice(0, 18);
-  return name || "Player";
-}
-function publicRoom(room) {
+
+function roomState(room) {
   return {
     code: room.code,
+    hostId: room.hostId,
+    status: room.status,
     phase: room.phase,
-    light: room.light,
-    timeLeft: Math.max(0, Math.ceil((room.phaseEnds - Date.now()) / 1000)),
-    winner: room.winner || null,
+    hard: room.hard,
+    timeLeft: Math.max(0, Math.ceil((room.endAt - Date.now()) / 100) / 10),
+    phaseEndsIn: Math.max(0, room.phaseEnd - Date.now()),
     players: [...room.players.values()].map(p => ({
-      id:p.id, name:p.name, x:p.x, alive:p.alive, finished:p.finished, host:p.host, color:p.color
+      id: p.id, name: p.name, number: p.number, x: p.x,
+      alive: p.alive, ready: p.ready
     }))
   };
 }
-function broadcast(room, msg) {
-  const data = JSON.stringify(msg);
-  for (const p of room.players.values()) {
-    if (p.ws.readyState === WebSocket.OPEN) p.ws.send(data);
-  }
-}
-function sendState(room) { broadcast(room, {type:"state", room: publicRoom(room)}); }
 
-function startGame(room) {
-  room.phase = "playing";
-  room.winner = null;
-  room.light = "green";
-  room.phaseEnds = Date.now() + 4000;
-  for (const p of room.players.values()) {
-    p.x = 0; p.alive = true; p.finished = false; p.moving = false;
-  }
-  sendState(room);
+function broadcast(room) {
+  io.to(room.code).emit("state", roomState(room));
 }
 
-function finishIfNeeded(room) {
+function setPhase(room, phase) {
+  room.phase = phase;
+  const min = phase === "green" ? (room.hard ? 900 : 1700) : (room.hard ? 700 : 1200);
+  const max = phase === "green" ? (room.hard ? 1700 : 3300) : (room.hard ? 1300 : 2800);
+  room.phaseEnd = Date.now() + min + Math.random() * (max - min);
+  clearTimeout(room.phaseTimer);
+  room.phaseTimer = setTimeout(() => tickPhase(room), room.phaseEnd - Date.now());
+  broadcast(room);
+}
+
+function tickPhase(room) {
+  if (room.status !== "playing") return;
+  setPhase(room, room.phase === "green" ? "red" : "green");
+}
+
+function finish(room, result) {
+  room.status = result;
+  clearTimeout(room.phaseTimer);
+  room.endAt = Date.now();
+  broadcast(room);
+}
+
+function maybeStart(room) {
+  const players = [...room.players.values()];
+  if (room.status !== "lobby" || players.length < 1 || !players.every(p => p.ready)) return;
+  room.status = "countdown";
+  room.countdownEnd = Date.now() + 3000;
+  broadcast(room);
+  clearTimeout(room.startTimer);
+  room.startTimer = setTimeout(() => {
+    if (room.status !== "countdown") return;
+    room.status = "playing";
+    room.startedAt = Date.now();
+    room.endAt = Date.now() + (room.hard ? 40000 : 60000);
+    setPhase(room, "green");
+    broadcast(room);
+  }, 3000);
+}
+
+function eliminateMovingPlayers(room) {
+  if (room.status !== "playing" || room.phase !== "red") return;
   for (const p of room.players.values()) {
-    if (p.alive && !p.finished && p.x >= 100) {
-      p.x = 100; p.finished = true; p.moving = false;
-      room.winner = p.name;
-      room.phase = "finished";
-      room.light = "red";
-      room.phaseEnds = Infinity;
-      sendState(room);
-      return true;
+    if (p.alive && p.movedDuringRed) {
+      p.alive = false;
+      p.movedDuringRed = false;
+      io.to(p.id).emit("eliminated", { reason: "You moved during RED LIGHT." });
     }
   }
-  return false;
+  broadcast(room);
 }
 
-function tickRoom(room) {
-  if (room.phase !== "playing") return;
-  const now = Date.now();
-
-  // Move players while green.
-  if (room.light === "green") {
-    for (const p of room.players.values()) {
-      if (p.alive && p.moving && !p.finished) p.x = Math.min(100, p.x + 1.15);
-    }
-    if (finishIfNeeded(room)) return;
-  }
-
-  if (now >= room.phaseEnds) {
-    if (room.light === "green") {
-      room.light = "red";
-      room.phaseEnds = now + 2500;
-      // Anyone still holding/moving when red begins is caught.
-      for (const p of room.players.values()) {
-        if (p.alive && p.moving && !p.finished) {
-          p.alive = false;
-          p.moving = false;
-        }
-      }
-    } else {
-      room.light = "green";
-      room.phaseEnds = now + 4000;
-    }
-    sendState(room);
-  } else {
-    // During red, a movement message is enough to eliminate a player.
-    // The server also sends periodic state updates for smooth clients.
-  }
-}
-
-setInterval(() => {
+const phaseCheck = setInterval(() => {
   for (const room of rooms.values()) {
-    tickRoom(room);
-    if (room.phase === "playing") sendState(room);
+    if (room.status !== "playing") continue;
+    if (Date.now() >= room.endAt) {
+      finish(room, "lost");
+      continue;
+    }
+    if (room.phase === "red") eliminateMovingPlayers(room);
+    const alive = [...room.players.values()].filter(p => p.alive);
+    const winner = alive.find(p => p.x >= 1000);
+    if (winner) {
+      winner.alive = true;
+      room.winnerId = winner.id;
+      finish(room, "won");
+    } else if (!alive.length) {
+      finish(room, "lost");
+    }
   }
 }, 100);
 
-const server = http.createServer((req, res) => {
-  let file = req.url.split("?")[0];
-  if (file === "/") file = "/index.html";
-  const filePath = path.join(__dirname, "public", path.normalize(file));
-  if (!filePath.startsWith(path.join(__dirname, "public"))) {
-    res.writeHead(403); return res.end("Forbidden");
-  }
-  fs.readFile(filePath, (err, data) => {
-    if (err) { res.writeHead(404); return res.end("Not found"); }
-    const ext = path.extname(filePath);
-    const type = ext === ".html" ? "text/html; charset=utf-8" :
-                 ext === ".png" ? "image/png" :
-                 ext === ".js" ? "text/javascript" :
-                 "application/octet-stream";
-    res.writeHead(200, {"Content-Type": type});
-    res.end(data);
-  });
-});
-
-const wss = new WebSocket.Server({server});
-wss.on("connection", ws => {
-  const id = crypto.randomUUID();
-  let player = null;
-  let room = null;
-
-  ws.on("message", raw => {
-    let msg;
-    try { msg = JSON.parse(raw.toString()); } catch { return; }
-
-    if (msg.type === "create") {
-      if (room) return;
-      const code = roomCode();
-      room = {
-        code, phase:"lobby", light:"green", phaseEnds:0, winner:null,
-        players:new Map()
-      };
-      player = {
-        id, ws, name:safeName(msg.name || "Zion"), x:0, alive:true,
-        finished:false, moving:false, host:true, color:COLORS[0]
-      };
-      room.players.set(id, player);
-      rooms.set(code, room);
-      ws.send(JSON.stringify({type:"joined", id, code, host:true}));
-      sendState(room);
-      return;
-    }
-
-    if (msg.type === "join") {
-      if (room) return;
-      const code = String(msg.code || "").toUpperCase().trim();
-      room = rooms.get(code);
-      if (!room || room.phase !== "lobby") {
-        ws.send(JSON.stringify({type:"error", message:"That room does not exist or has already started."}));
-        room = null;
-        return;
-      }
-      player = {
-        id, ws, name:safeName(msg.name || "Player"), x:0, alive:true,
-        finished:false, moving:false, host:false,
-        color:COLORS[room.players.size % COLORS.length]
-      };
-      room.players.set(id, player);
-      ws.send(JSON.stringify({type:"joined", id, code, host:false}));
-      sendState(room);
-      return;
-    }
-
-    if (!room || !player) return;
-
-    if (msg.type === "start" && player.host && room.phase === "lobby") {
-      startGame(room);
-      return;
-    }
-    if (msg.type === "move") {
-      if (room.phase !== "playing" || !player.alive || player.finished) return;
-      const moving = !!msg.moving;
-      if (room.light === "red" && moving) {
-        player.alive = false;
-        player.moving = false;
-        sendState(room);
-      } else {
-        player.moving = moving;
-      }
-      return;
-    }
-    if (msg.type === "reset" && player.host) {
-      room.phase = "lobby"; room.light = "green"; room.winner = null; room.phaseEnds = 0;
-      for (const p of room.players.values()) {
-        p.x=0; p.alive=true; p.finished=false; p.moving=false;
-      }
-      sendState(room);
-    }
+io.on("connection", socket => {
+  socket.on("createRoom", ({ name, hard }) => {
+    const roomCode = code();
+    const room = {
+      code: roomCode, hostId: socket.id, status: "lobby", phase: "red",
+      phaseEnd: 0, endAt: 0, hard: !!hard, players: new Map()
+    };
+    rooms.set(roomCode, room);
+    addPlayer(socket, room, name || "Player");
   });
 
-  ws.on("close", () => {
-    if (!room || !player) return;
-    room.players.delete(player.id);
-    if (room.players.size === 0) {
-      rooms.delete(room.code);
-    } else if (player.host) {
+  socket.on("joinRoom", ({ code: roomCode, name }) => {
+    const room = rooms.get(String(roomCode || "").trim());
+    if (!room) return socket.emit("errorMessage", "Room not found.");
+    if (room.status !== "lobby") return socket.emit("errorMessage", "That game has already started.");
+    if (room.players.size >= MAX_PLAYERS) return socket.emit("errorMessage", "Room is full.");
+    addPlayer(socket, room, name || "Player");
+  });
+
+  socket.on("ready", () => {
+    const room = socket.room && rooms.get(socket.room);
+    const p = room?.players.get(socket.id);
+    if (!room || !p) return;
+    p.ready = !p.ready;
+    maybeStart(room);
+    broadcast(room);
+  });
+
+  socket.on("move", () => {
+    const room = socket.room && rooms.get(socket.room);
+    const p = room?.players.get(socket.id);
+    if (!room || !p || room.status !== "playing" || !p.alive) return;
+    if (room.phase === "red") {
+      p.movedDuringRed = true;
+      return;
+    }
+    p.x = Math.min(1000, p.x + (room.hard ? 7 : 11));
+    broadcast(room);
+  });
+
+  socket.on("restart", () => {
+    const room = socket.room && rooms.get(socket.room);
+    if (!room || room.hostId !== socket.id) return;
+    clearTimeout(room.phaseTimer);
+    clearTimeout(room.startTimer);
+    room.status = "lobby"; room.phase = "red"; room.winnerId = null;
+    for (const p of room.players.values()) {
+      p.x = 120; p.alive = true; p.ready = false; p.movedDuringRed = false;
+    }
+    broadcast(room);
+  });
+
+  socket.on("disconnect", () => {
+    const room = socket.room && rooms.get(socket.room);
+    if (!room) return;
+    room.players.delete(socket.id);
+    if (room.hostId === socket.id) {
       const next = room.players.values().next().value;
-      next.host = true;
-      sendState(room);
-    } else {
-      sendState(room);
+      room.hostId = next?.id || null;
     }
+    if (!room.players.size) {
+      clearTimeout(room.phaseTimer);
+      clearTimeout(room.startTimer);
+      rooms.delete(room.code);
+    } else broadcast(room);
   });
 });
 
-server.listen(PORT, () => console.log(`Zion Squid Multiplayer running on port ${PORT}`));
+function addPlayer(socket, room, name) {
+  const nums = [...room.players.values()].map(p => p.number);
+  let number = nums.includes("067") ? "456" : "067";
+  if (number === "456") {
+    const candidates = ["143","218","321","198","109","333","512","777"];
+    number = candidates.find(n => !nums.includes(n)) || String(100 + room.players.size);
+  }
+  const player = {
+    id: socket.id, name: String(name).slice(0, 18),
+    number, x: 120, alive: true, ready: false, movedDuringRed: false
+  };
+  room.players.set(socket.id, player);
+  socket.join(room.code);
+  socket.room = room.code;
+  socket.emit("joined", { code: room.code, you: player.id });
+  broadcast(room);
+}
+
+server.listen(PORT, "0.0.0.0", () => {
+  console.log(`Zion Squid Game listening on port ${PORT}`);
+});
